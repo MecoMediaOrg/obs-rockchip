@@ -11,6 +11,7 @@ set -euo pipefail
 WORKSPACE=${WORKSPACE:-"$(pwd)"}
 FFMPEG_SRC_DIR=${FFMPEG_SRC_DIR:-"$WORKSPACE/ffmpeg-rockchip"}
 MPP_SRC_DIR=${MPP_SRC_DIR:-"$WORKSPACE/mpp"}
+RGA_SRC_DIR=${RGA_SRC_DIR:-"$WORKSPACE/rga"}
 OBS_SRC_DIR=${OBS_SRC_DIR:-"$WORKSPACE/obs-studio"}
 PREFIX_DIR=${PREFIX_DIR:-"$WORKSPACE/install/ffmpeg-rockchip"}
 BUILD_DIR=${BUILD_DIR:-"$WORKSPACE/build"}
@@ -22,6 +23,9 @@ CCACHE_DIR=${CCACHE_DIR:-"$WORKSPACE/.ccache"}
 CCACHE_MAXSIZE=${CCACHE_MAXSIZE:-"10G"}
 # Allow opting out
 USE_CCACHE=${USE_CCACHE:-"1"}
+# Build optimization settings
+ENABLE_LTO=${ENABLE_LTO:-"1"}
+ENABLE_UNITY_BUILD=${ENABLE_UNITY_BUILD:-"0"}
 # Source control settings
 FFMPEG_BRANCH=${FFMPEG_BRANCH:-"6.1"}
 
@@ -51,7 +55,10 @@ install_deps() {
 
   case "$id" in
     ubuntu|debian)
+      # Update package lists
       sudo apt-get update
+      
+      # Install essential packages first
       sudo apt-get install -y --no-install-recommends software-properties-common
       sudo add-apt-repository -y universe || true
       sudo add-apt-repository -y multiverse || true
@@ -81,26 +88,51 @@ install_deps() {
         libspeexdsp-dev libsrt-openssl-dev qt6-base-dev qt6-base-private-dev qt6-wayland \
         qt6-image-formats-plugins fakeroot debhelper devscripts equivs libsimde-dev \
         libxss-dev libdbus-1-dev nlohmann-json3-dev libwebsocketpp-dev libasio-dev \
-        libvulkan-dev libzstd-dev libb2-dev libsrtp2-1 libusrsctp2 libvlc-dev
+        libvulkan-dev libzstd-dev libb2-dev libsrtp2-1 libusrsctp2 libvlc-dev \
+        meson
       # Optional vendor SDKs (best-effort)
       # libajantv2-dev installed manually from Debian multimedia repository
       # Optional packages (best-effort; may not exist in minimal images)
       sudo apt-get install -y --no-install-recommends librist-dev || true
-      sudo apt-get install -y --no-install-recommends libvpl-dev || true
+      # sudo apt-get install -y --no-install-recommends libvpl-dev || true #Not available on arm64
       sudo apt-get install -y --no-install-recommends qt6-svg-dev || true
-      # Install libdata-channel-dev from Debian multimedia repository
-      wget -q https://www.deb-multimedia.org/pool/main/libd/libdatachannel-dmo/libdatachannel0.23_0.23.1-dmo1_arm64.deb -O /tmp/libdatachannel0.23.deb || true
-      sudo dpkg -i /tmp/libdatachannel0.23.deb || true
-      wget -q https://www.deb-multimedia.org/pool/main/libd/libdatachannel-dmo/libdatachannel-dev_0.23.1-dmo1_arm64.deb -O /tmp/libdatachannel-dev.deb || true
-      sudo dpkg -i /tmp/libdatachannel-dev.deb || true
-      # Note: libajantv2-dev doesn't exist for ARM64, so we skip it
-      # wget -q https://www.deb-multimedia.org/pool/main/liba/libajantv2-dmo/libajantv2-dev_17.5.0-dmo1_arm64.deb -O /tmp/libajantv2-dev.deb || true
-      # sudo dpkg -i /tmp/libajantv2-dev.deb || true
-      # Install CEF from Spotify CDN
-      wget -q https://cef-builds.spotifycdn.com/cef_binary_140.1.14%2Bgeb1c06e%2Bchromium-140.0.7339.185_linuxarm64_minimal.tar.bz2 -O /tmp/cef.tar.bz2 || true
-      cd /tmp && tar -xjf cef.tar.bz2 || true
-      sudo mkdir -p /usr/local/cef || true
-      sudo cp -r cef_binary_140.1.14+geb1c06e+chromium-140.0.7339.185_linuxarm64_minimal/* /usr/local/cef/ || true
+      
+      # Download external dependencies in parallel
+      log "Downloading external dependencies in parallel..."
+      (
+        # Download libdatachannel packages
+        if [[ ! -f /tmp/libdatachannel0.23.deb ]]; then
+          wget -q https://www.deb-multimedia.org/pool/main/libd/libdatachannel-dmo/libdatachannel0.23_0.23.1-dmo1_arm64.deb -O /tmp/libdatachannel0.23.deb || true
+        fi
+        if [[ ! -f /tmp/libdatachannel-dev.deb ]]; then
+          wget -q https://www.deb-multimedia.org/pool/main/libd/libdatachannel-dmo/libdatachannel-dev_0.23.1-dmo1_arm64.deb -O /tmp/libdatachannel-dev.deb || true
+        fi
+      ) &
+      
+      (
+        # Download CEF in parallel
+        if [[ ! -f /tmp/cef.tar.bz2 ]]; then
+          wget -q https://cef-builds.spotifycdn.com/cef_binary_140.1.14%2Bgeb1c06e%2Bchromium-140.0.7339.185_linuxarm64_minimal.tar.bz2 -O /tmp/cef.tar.bz2 || true
+        fi
+      ) &
+      
+      # Wait for downloads to complete
+      wait
+      
+      # Install libdatachannel packages
+      if [[ -f /tmp/libdatachannel0.23.deb ]]; then
+        sudo dpkg -i /tmp/libdatachannel0.23.deb || true
+      fi
+      if [[ -f /tmp/libdatachannel-dev.deb ]]; then
+        sudo dpkg -i /tmp/libdatachannel-dev.deb || true
+      fi
+      
+      # Install CEF
+      if [[ -f /tmp/cef.tar.bz2 ]]; then
+        cd /tmp && tar -xjf cef.tar.bz2 || true
+        sudo mkdir -p /usr/local/cef || true
+        sudo cp -r cef_binary_140.1.14+geb1c06e+chromium-140.0.7339.185_linuxarm64_minimal/* /usr/local/cef/ || true
+      fi
       # Set up CEF CMake configuration for OBS
       sudo mkdir -p /usr/local/cef/lib/cmake/cef || true
       sudo tee /usr/local/cef/lib/cmake/cef/cef-config.cmake > /dev/null << 'EOF'
@@ -156,18 +188,30 @@ build_mpp() {
   require_command cmake
   require_command make
 
+  # Check if MPP is already built and installed
+  if [[ -f "$PREFIX_DIR/lib/pkgconfig/rockchip_mpp.pc" ]] && pkg-config --exists rockchip_mpp; then
+    log "MPP already built and installed, skipping build"
+    export PKG_CONFIG_PATH="$PREFIX_DIR/lib/pkgconfig:$PREFIX_DIR/lib/aarch64-linux-gnu/pkgconfig:$PREFIX_DIR/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
+    export LD_LIBRARY_PATH="$PREFIX_DIR/lib:${LD_LIBRARY_PATH:-}"
+    return 0
+  fi
+
   if [[ ! -d "$MPP_SRC_DIR/.git" ]]; then
-    git clone --depth=1 https://github.com/rockchip-linux/mpp.git "$MPP_SRC_DIR"
+    log "Cloning MPP repository..."
+    git clone -b jellyfin-mpp --depth=1 https://github.com/nyanmisaka/mpp.git "$MPP_SRC_DIR"
   fi
 
   pushd "$MPP_SRC_DIR" >/dev/null
-  mkdir -p build && cd build
-  if [[ "$USE_CCACHE" == "1" && -n "${CC:-}" ]]; then
-    cmake -DCMAKE_BUILD_TYPE="$BUILD_TYPE" -DCMAKE_INSTALL_PREFIX="$PREFIX_DIR" \
-      -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache ..
-  else
-    cmake -DCMAKE_BUILD_TYPE="$BUILD_TYPE" -DCMAKE_INSTALL_PREFIX="$PREFIX_DIR" ..
-  fi
+  mkdir -p rkmpp_build && cd rkmpp_build
+  
+  # Configure with the correct options from your example
+  cmake \
+    -DCMAKE_INSTALL_PREFIX="$PREFIX_DIR" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_SHARED_LIBS=ON \
+    -DBUILD_TEST=OFF \
+    ..
+  
   make -j"$NUM_JOBS"
   make install
   popd >/dev/null
@@ -184,6 +228,56 @@ build_mpp() {
     ls -la "$PREFIX_DIR/lib/aarch64-linux-gnu/pkgconfig" || true
     ls -la "$PREFIX_DIR/lib/x86_64-linux-gnu/pkgconfig" || true
     echo "ERROR: rockchip_mpp pkg-config not found after MPP install" >&2
+    exit 1
+  fi
+}
+
+build_rga() {
+  log "Building Rockchip RGA into $PREFIX_DIR"
+  require_command git
+  require_command meson
+  require_command ninja
+
+  # Check if RGA is already built and installed
+  if [[ -f "$PREFIX_DIR/lib/pkgconfig/librga.pc" ]] && pkg-config --exists librga; then
+    log "RGA already built and installed, skipping build"
+    export PKG_CONFIG_PATH="$PREFIX_DIR/lib/pkgconfig:$PREFIX_DIR/lib/aarch64-linux-gnu/pkgconfig:$PREFIX_DIR/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
+    export LD_LIBRARY_PATH="$PREFIX_DIR/lib:${LD_LIBRARY_PATH:-}"
+    return 0
+  fi
+
+  if [[ ! -d "$RGA_SRC_DIR/.git" ]]; then
+    log "Cloning RGA repository..."
+    git clone -b jellyfin-rga --depth=1 https://github.com/nyanmisaka/rk-mirrors.git "$RGA_SRC_DIR"
+  fi
+
+  pushd "$RGA_SRC_DIR" >/dev/null
+  # Setup meson build directory
+  meson setup rkrga_build \
+    --prefix="$PREFIX_DIR" \
+    --libdir=lib \
+    --buildtype=release \
+    --default-library=shared \
+    -Dcpp_args=-fpermissive \
+    -Dlibdrm=false \
+    -Dlibrga_demo=false
+  
+  meson configure rkrga_build
+  ninja -C rkrga_build install
+  popd >/dev/null
+
+  # Export for downstream discovery
+  export PKG_CONFIG_PATH="$PREFIX_DIR/lib/pkgconfig:$PREFIX_DIR/lib/aarch64-linux-gnu/pkgconfig:$PREFIX_DIR/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
+  export LD_LIBRARY_PATH="$PREFIX_DIR/lib:${LD_LIBRARY_PATH:-}"
+
+  if ! pkg-config --exists librga; then
+    log "librga.pc not found in PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
+    log "Listing possible pkgconfig dirs:"
+    ls -la "$PREFIX_DIR/lib" || true
+    ls -la "$PREFIX_DIR/lib/pkgconfig" || true
+    ls -la "$PREFIX_DIR/lib/aarch64-linux-gnu/pkgconfig" || true
+    ls -la "$PREFIX_DIR/lib/x86_64-linux-gnu/pkgconfig" || true
+    echo "ERROR: librga pkg-config not found after RGA install" >&2
     exit 1
   fi
 }
@@ -212,29 +306,46 @@ build_ffmpeg_rockchip() {
     git rev-parse --short HEAD | xargs -I{} bash -c 'echo "[build-obs-rockchip] ffmpeg-rockchip @ {} (branch ${FFMPEG_BRANCH})"'
   fi
 
-  # Ensure rockchip_mpp is visible to pkg-config
+  # Ensure rockchip_mpp and librga are visible to pkg-config
   if ! pkg-config --exists rockchip_mpp; then
     echo "ERROR: rockchip_mpp not found using pkg-config (PKG_CONFIG_PATH=${PKG_CONFIG_PATH:-})" >&2
     exit 1
   fi
+  
+  if ! pkg-config --exists librga; then
+    echo "ERROR: librga not found using pkg-config (PKG_CONFIG_PATH=${PKG_CONFIG_PATH:-})" >&2
+    exit 1
+  fi
 
-  # Configure per ffmpeg-rockchip wiki guidance; enable RKMPP and common codecs OBS expects
-  ./configure \
-    --prefix="$PREFIX_DIR" \
-    --enable-gpl \
-    --enable-version3 \
-    --enable-nonfree \
-    --enable-libx264 \
-    --enable-libx265 \
-    --enable-libvpx \
-    --enable-libdrm \
-    --enable-libv4l2 \
-    --enable-openssl \
-    --enable-rkmpp \
-    --extra-cflags="-I$PREFIX_DIR/include" \
-    --extra-ldflags="-L$PREFIX_DIR/lib" \
-    --enable-shared \
+  # Configure per ffmpeg-rockchip wiki guidance; enable RKMPP, RGA and common codecs OBS expects
+  CONFIGURE_FLAGS=(
+    --prefix="$PREFIX_DIR"
+    --enable-gpl
+    --enable-version3
+    --enable-nonfree
+    --enable-libx264
+    --enable-libx265
+    --enable-libvpx
+    --enable-libdrm
+    --enable-libv4l2
+    --enable-openssl
+    --enable-rkmpp
+    --enable-rkrga
+    --extra-cflags="-I$PREFIX_DIR/include"
+    --extra-ldflags="-L$PREFIX_DIR/lib"
+    --enable-shared
     --disable-static
+  )
+  
+  # Add optimization flags for Release builds
+  if [[ "$BUILD_TYPE" == "Release" ]]; then
+    CONFIGURE_FLAGS+=(
+      --extra-cflags="-O3 -march=native"
+      --extra-ldflags="-Wl,--as-needed"
+    )
+  fi
+  
+  ./configure "${CONFIGURE_FLAGS[@]}"
 
   # Ensure make uses ccache-wrapped compilers if enabled
   if [[ "$USE_CCACHE" == "1" && -n "${CC:-}" ]]; then
@@ -310,6 +421,16 @@ build_obs() {
     CMAKE_LAUNCHERS=()
   fi
 
+  # Build optimization flags
+  CMAKE_OPTIMIZATIONS=()
+  if [[ "$ENABLE_LTO" == "1" ]]; then
+    CMAKE_OPTIMIZATIONS+=(-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON)
+  fi
+  if [[ "$ENABLE_UNITY_BUILD" == "1" ]]; then
+    CMAKE_OPTIMIZATIONS+=(-DCMAKE_UNITY_BUILD=ON)
+  fi
+
+
   cmake -G Ninja \
     -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     -DUNIX_STRUCTURE=ON \
@@ -319,6 +440,9 @@ build_obs() {
     -DENABLE_AJA=OFF \
     -DFFMPEG_ROOT="$PREFIX_DIR" \
     -DCMAKE_PREFIX_PATH="$PREFIX_DIR" \
+    -DCMAKE_C_FLAGS="-D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE" \
+    -DCMAKE_CXX_FLAGS="-D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE" \
+    ${CMAKE_OPTIMIZATIONS[@]:-} \
     ${CMAKE_LAUNCHERS[@]:-} \
     ${SIMDE_HINT} \
     "$OBS_SRC_DIR"
@@ -367,6 +491,7 @@ package_artifacts() {
 main() {
   install_deps
   build_mpp
+  build_rga
   build_ffmpeg_rockchip
   configure_obs_deps
   build_obs

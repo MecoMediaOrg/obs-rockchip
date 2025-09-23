@@ -14,13 +14,17 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Cache ccache
+      - name: Cache all dependencies
         uses: actions/cache@v4
         with:
-          path: ${{ github.workspace }}/.ccache
-          key: ccache-${{ runner.os }}-${{ hashFiles('scripts/build-obs-rockchip.sh', 'ffmpeg-rockchip/**', 'obs-studio/**') }}
+          path: |
+            ${{ github.workspace }}/.ccache
+            ${{ github.workspace }}/install/ffmpeg-rockchip
+            /tmp/cef.tar.bz2
+            /tmp/libdatachannel*.deb
+          key: all-cache-${{ runner.os }}-${{ hashFiles('scripts/build-obs-rockchip.sh', 'ffmpeg-rockchip/**', 'obs-studio/**', 'mpp/**', 'rga/**') }}
           restore-keys: |
-            ccache-${{ runner.os }}-
+            all-cache-${{ runner.os }}-
 
       - name: Make script executable
         run: chmod +x scripts/build-obs-rockchip.sh
