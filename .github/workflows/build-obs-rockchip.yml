@@ -1,0 +1,49 @@
+name: Build OBS with ffmpeg-rockchip
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ runner.os }}-${{ hashFiles('scripts/build-obs-rockchip.sh', 'ffmpeg-rockchip/**', 'obs-studio/**') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
+
+      - name: Make script executable
+        run: chmod +x scripts/build-obs-rockchip.sh
+
+      - name: Build OBS with ffmpeg-rockchip
+        env:
+          WORKSPACE: ${{ github.workspace }}
+          NUM_JOBS: 4
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+        run: scripts/build-obs-rockchip.sh
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-rockchip-debs
+          path: artifacts/*
+
+      - name: Create GitHub Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+

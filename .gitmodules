@@ -1,0 +1,7 @@
+[submodule "obs-studio"]
+	path = obs-studio
+	url = https://github.com/obsproject/obs-studio.git
+[submodule "ffmpeg-rockchip"]
+	path = ffmpeg-rockchip
+	url = https://github.com/nyanmisaka/ffmpeg-rockchip.git
+	branch = 6.1
