@@ -28,6 +28,7 @@ ENABLE_LTO=${ENABLE_LTO:-"1"}
 ENABLE_UNITY_BUILD=${ENABLE_UNITY_BUILD:-"0"}
 # Source control settings
 FFMPEG_BRANCH=${FFMPEG_BRANCH:-"6.1"}
+OBS_VERSION=${OBS_VERSION:-"32.0.0"}
 
 mkdir -p "$PREFIX_DIR" "$BUILD_DIR"
 
@@ -180,6 +181,33 @@ setup_ccache() {
   else
     log "ccache not found; proceeding without compiler cache"
   fi
+}
+
+clone_obs() {
+  log "Cloning OBS Studio version $OBS_VERSION"
+  require_command git
+  
+  # Check if OBS is already cloned and on the correct version
+  if [[ -d "$OBS_SRC_DIR/.git" ]]; then
+    pushd "$OBS_SRC_DIR" >/dev/null
+    current_version=$(git describe --tags --exact-match 2>/dev/null || echo "unknown")
+    if [[ "$current_version" == "$OBS_VERSION" ]]; then
+      log "OBS Studio $OBS_VERSION already cloned, skipping"
+      popd >/dev/null
+      return 0
+    fi
+    popd >/dev/null
+  fi
+  
+  # Remove existing directory if it exists
+  rm -rf "$OBS_SRC_DIR"
+  
+  # Clone the specific version (tag)
+  git clone --depth=1 --branch="$OBS_VERSION" https://github.com/obsproject/obs-studio.git "$OBS_SRC_DIR"
+  
+  pushd "$OBS_SRC_DIR" >/dev/null
+  git rev-parse --short HEAD | xargs -I{} bash -c 'echo "[build-obs-rockchip] OBS Studio @ {} (version ${OBS_VERSION})"'
+  popd >/dev/null
 }
 
 build_mpp() {
@@ -490,6 +518,7 @@ package_artifacts() {
 
 main() {
   install_deps
+  clone_obs
   build_mpp
   build_rga
   build_ffmpeg_rockchip
