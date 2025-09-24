@@ -90,7 +90,7 @@ install_deps() {
         qt6-image-formats-plugins fakeroot debhelper devscripts equivs libsimde-dev \
         libxss-dev libdbus-1-dev nlohmann-json3-dev libwebsocketpp-dev libasio-dev \
         libvulkan-dev libzstd-dev libb2-dev libsrtp2-1 libusrsctp2 libvlc-dev \
-        meson
+        meson libfdk-aac-dev
       # Optional vendor SDKs (best-effort)
       # libajantv2-dev installed manually from Debian multimedia repository
       # Optional packages (best-effort; may not exist in minimal images)
@@ -506,6 +506,9 @@ build_obs() {
     -DENABLE_PIPEWIRE=ON \
     -DENABLE_WAYLAND=ON \
     -DENABLE_QT6=ON \
+    -DENABLE_BROWSER=ON \
+    -DCEF_ROOT_DIR="/usr/local/cef" \
+    -DENABLE_FDK=ON \
     -DENABLE_AJA=OFF \
     -DFFMPEG_ROOT="$PREFIX_DIR" \
     -DCMAKE_PREFIX_PATH="$PREFIX_DIR" \
