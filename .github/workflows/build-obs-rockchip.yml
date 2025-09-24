@@ -8,6 +8,9 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     permissions:
       contents: write
+    env:
+      OBS_VERSION: 32.0.0
+      FFMPEG_BRANCH: 6.1
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -32,8 +35,6 @@ jobs:
           WORKSPACE: ${{ github.workspace }}
           NUM_JOBS: 4
           CCACHE_DIR: ${{ github.workspace }}/.ccache
-          OBS_VERSION: 32.0.0
-          FFMPEG_BRANCH: 6.1
         run: scripts/build-obs-rockchip.sh
 
       - name: Upload artifacts
@@ -54,6 +55,5 @@ jobs:
           files: artifacts/*.deb
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OBS_VERSION: ${{ env.OBS_VERSION }}
 
 
