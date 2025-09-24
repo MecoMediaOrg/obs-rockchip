@@ -229,10 +229,10 @@ clone_ffmpeg_rockchip() {
       return 0
     fi
     popd >/dev/null
+    # Only remove if on wrong branch
+    log "ffmpeg-rockchip on wrong branch ($current_branch vs $FFMPEG_BRANCH), removing"
+    rm -rf "$FFMPEG_SRC_DIR"
   fi
-  
-  # Remove existing directory if it exists
-  rm -rf "$FFMPEG_SRC_DIR"
   
   # Clone the specific branch
   git clone --depth=1 --branch="$FFMPEG_BRANCH" https://github.com/nyanmisaka/ffmpeg-rockchip.git "$FFMPEG_SRC_DIR"
@@ -346,6 +346,15 @@ build_ffmpeg_rockchip() {
   log "Building ffmpeg-rockchip from $FFMPEG_SRC_DIR"
   require_command gcc
   require_command make
+
+  # Check if ffmpeg is already built and installed
+  if [[ -f "$PREFIX_DIR/bin/ffmpeg" ]] && [[ -f "$PREFIX_DIR/lib/pkgconfig/libavcodec.pc" ]]; then
+    log "ffmpeg-rockchip already built and installed, skipping build"
+    export PKG_CONFIG_PATH="$PREFIX_DIR/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+    export LD_LIBRARY_PATH="$PREFIX_DIR/lib:${LD_LIBRARY_PATH:-}"
+    export PATH="$PREFIX_DIR/bin:$PATH"
+    return 0
+  fi
 
   pushd "$FFMPEG_SRC_DIR" >/dev/null
 
