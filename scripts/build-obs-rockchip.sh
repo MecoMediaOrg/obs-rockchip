@@ -111,9 +111,9 @@ install_deps() {
       ) &
       
       (
-        # Download CEF in parallel
+        # Download CEF in parallel (standard build, not minimal, to include libcef_dll_wrapper)
         if [[ ! -f /tmp/cef.tar.bz2 ]]; then
-          wget -q https://cef-builds.spotifycdn.com/cef_binary_140.1.14%2Bgeb1c06e%2Bchromium-140.0.7339.185_linuxarm64_minimal.tar.bz2 -O /tmp/cef.tar.bz2 || true
+          wget -q https://cef-builds.spotifycdn.com/cef_binary_140.1.14%2Bgeb1c06e%2Bchromium-140.0.7339.185_linuxarm64.tar.bz2 -O /tmp/cef.tar.bz2 || true
         fi
       ) &
       
@@ -132,7 +132,8 @@ install_deps() {
       if [[ -f /tmp/cef.tar.bz2 ]]; then
         cd /tmp && tar -xjf cef.tar.bz2 || true
         sudo mkdir -p /usr/local/cef || true
-        sudo cp -r cef_binary_140.1.14+geb1c06e+chromium-140.0.7339.185_linuxarm64_minimal/* /usr/local/cef/ || true
+        # Copy from standard (non-minimal) package so libcef_dll_wrapper is available
+        sudo cp -r cef_binary_140.1.14+geb1c06e+chromium-140.0.7339.185_linuxarm64/* /usr/local/cef/ || true
       fi
       # Set up CEF CMake configuration for OBS
       sudo mkdir -p /usr/local/cef/lib/cmake/cef || true
