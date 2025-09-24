@@ -205,6 +205,11 @@ clone_obs() {
   # Clone the specific version (tag)
   git clone --depth=1 --branch="$OBS_VERSION" https://github.com/obsproject/obs-studio.git "$OBS_SRC_DIR"
   
+  # Initialize and update submodules (required for obs-browser)
+  pushd "$OBS_SRC_DIR" >/dev/null
+  git submodule update --init --recursive
+  popd >/dev/null
+  
   pushd "$OBS_SRC_DIR" >/dev/null
   git rev-parse --short HEAD | xargs -I{} bash -c 'echo "[build-obs-rockchip] OBS Studio @ {} (version ${OBS_VERSION})"'
   popd >/dev/null
