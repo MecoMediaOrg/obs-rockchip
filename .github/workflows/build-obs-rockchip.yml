@@ -2,6 +2,22 @@ name: Build OBS with ffmpeg-rockchip
 
 on:
   workflow_dispatch:
+    inputs:
+      obs_version:
+        description: "OBS Studio tag/version (e.g. 32.0.0)"
+        required: false
+        default: "32.0.0"
+        type: string
+      ffmpeg_branch:
+        description: "ffmpeg-rockchip branch/tag (e.g. 6.1)"
+        required: false
+        default: "6.1"
+        type: string
+      ignore_cache:
+        description: "Ignore/disable dependency cache for a clean build"
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
@@ -9,14 +25,15 @@ jobs:
     permissions:
       contents: write
     env:
-      OBS_VERSION: 32.0.0
-      FFMPEG_BRANCH: 6.1
+      OBS_VERSION: ${{ inputs.obs_version }}
+      FFMPEG_BRANCH: ${{ inputs.ffmpeg_branch }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Cache all dependencies
         uses: actions/cache@v4
+        if: ${{ !inputs.ignore_cache }}
         with:
           path: |
             ${{ github.workspace }}/.ccache
@@ -35,6 +52,7 @@ jobs:
           WORKSPACE: ${{ github.workspace }}
           NUM_JOBS: 4
           CCACHE_DIR: ${{ github.workspace }}/.ccache
+          USE_CCACHE: ${{ inputs.ignore_cache && '0' || '1' }}
         run: scripts/build-obs-rockchip.sh
 
       - name: Upload artifacts
