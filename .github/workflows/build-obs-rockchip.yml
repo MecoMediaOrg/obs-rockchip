@@ -11,8 +11,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
 
       - name: Cache all dependencies
         uses: actions/cache@v4
@@ -34,6 +32,8 @@ jobs:
           WORKSPACE: ${{ github.workspace }}
           NUM_JOBS: 4
           CCACHE_DIR: ${{ github.workspace }}/.ccache
+          OBS_VERSION: 32.0.0
+          FFMPEG_BRANCH: 6.1
         run: scripts/build-obs-rockchip.sh
 
       - name: Upload artifacts
@@ -46,8 +46,14 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
+          name: "${{ env.OBS_VERSION }}-rockchip"
+          body: |
+            ## ${{ env.OBS_VERSION }}-rockchip
+            
+            A specialized build of OBS Studio optimized for Rockchip ARM64 platforms (RK3588/RK3588s) with hardware-accelerated video encoding and decoding using Rockchip's MPP (Media Process Platform) and RGA (2D Raster Graphic Acceleration) libraries.
+          files: artifacts/*.deb
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OBS_VERSION: ${{ env.OBS_VERSION }}
 
 

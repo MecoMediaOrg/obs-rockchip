@@ -215,6 +215,33 @@ clone_obs() {
   popd >/dev/null
 }
 
+clone_ffmpeg_rockchip() {
+  log "Cloning ffmpeg-rockchip branch $FFMPEG_BRANCH"
+  require_command git
+  
+  # Check if ffmpeg-rockchip is already cloned and on the correct branch
+  if [[ -d "$FFMPEG_SRC_DIR/.git" ]]; then
+    pushd "$FFMPEG_SRC_DIR" >/dev/null
+    current_branch=$(git branch --show-current 2>/dev/null || echo "unknown")
+    if [[ "$current_branch" == "$FFMPEG_BRANCH" ]]; then
+      log "ffmpeg-rockchip branch $FFMPEG_BRANCH already cloned, skipping"
+      popd >/dev/null
+      return 0
+    fi
+    popd >/dev/null
+  fi
+  
+  # Remove existing directory if it exists
+  rm -rf "$FFMPEG_SRC_DIR"
+  
+  # Clone the specific branch
+  git clone --depth=1 --branch="$FFMPEG_BRANCH" https://github.com/nyanmisaka/ffmpeg-rockchip.git "$FFMPEG_SRC_DIR"
+  
+  pushd "$FFMPEG_SRC_DIR" >/dev/null
+  git rev-parse --short HEAD | xargs -I{} bash -c 'echo "[build-obs-rockchip] ffmpeg-rockchip @ {} (branch ${FFMPEG_BRANCH})"'
+  popd >/dev/null
+}
+
 build_mpp() {
   log "Building Rockchip MPP into $PREFIX_DIR"
   require_command git
@@ -524,6 +551,7 @@ package_artifacts() {
 main() {
   install_deps
   clone_obs
+  clone_ffmpeg_rockchip
   build_mpp
   build_rga
   build_ffmpeg_rockchip
