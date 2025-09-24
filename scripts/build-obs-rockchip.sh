@@ -83,7 +83,7 @@ install_deps() {
         libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev libxcb-randr0-dev \
         libxcb-xinerama0-dev libxcb-composite0-dev libxcb-xinput-dev libxcomposite-dev libxinerama-dev libgl1-mesa-dev \
         libglvnd-dev libgles2-mesa-dev libasound2-dev libpulse-dev \
-        libx11-xcb-dev \
+        libx11-xcb-dev libxkbcommon-dev wayland-protocols \
         libfreetype6-dev libfontconfig1-dev libjansson-dev libmbedtls-dev \
         libcurl4-openssl-dev libudev-dev libpci-dev swig libcmocka-dev \
         libpipewire-0.3-dev libqrcodegencpp-dev uthash-dev libva-dev \
@@ -91,7 +91,7 @@ install_deps() {
         qt6-image-formats-plugins fakeroot debhelper devscripts equivs libsimde-dev \
         libxss-dev libdbus-1-dev nlohmann-json3-dev libwebsocketpp-dev libasio-dev \
         libvulkan-dev libzstd-dev libb2-dev libsrtp2-1 libusrsctp2 libvlc-dev \
-        meson libfdk-aac-dev
+        meson libfdk-aac-dev libgtk-3-dev
       # Optional vendor SDKs (best-effort)
       # libajantv2-dev installed manually from Debian multimedia repository
       # Optional packages (best-effort; may not exist in minimal images)
@@ -111,13 +111,6 @@ install_deps() {
         fi
       ) &
       
-      (
-        # Download CEF in parallel (standard build, not minimal, to include libcef_dll_wrapper)
-        if [[ ! -f /tmp/cef.tar.bz2 ]]; then
-          wget -q https://cef-builds.spotifycdn.com/cef_binary_140.1.14%2Bgeb1c06e%2Bchromium-140.0.7339.185_linuxarm64.tar.bz2 -O /tmp/cef.tar.bz2 || true
-        fi
-      ) &
-      
       # Wait for downloads to complete
       wait
       
@@ -128,42 +121,6 @@ install_deps() {
       if [[ -f /tmp/libdatachannel-dev.deb ]]; then
         sudo dpkg -i /tmp/libdatachannel-dev.deb || true
       fi
-      
-      # Install CEF
-      if [[ -f /tmp/cef.tar.bz2 ]]; then
-        # Clean any previously extracted CEF directories to avoid ambiguity
-        rm -rf /tmp/cef_binary_*_linuxarm64* || true
-        cd /tmp && tar -xjf cef.tar.bz2 || true
-        # Detect extracted directory (supports both standard and minimal variants)
-        CEF_EXTRACT_DIR="$(find /tmp -maxdepth 1 -type d -name 'cef_binary_*_linuxarm64*' | head -n1 || true)"
-        if [[ -z "${CEF_EXTRACT_DIR}" || ! -d "${CEF_EXTRACT_DIR}" ]]; then
-          echo "CEF archive extracted, but directory not found" >&2
-        else
-          sudo mkdir -p /usr/local/cef || true
-          sudo cp -r "${CEF_EXTRACT_DIR}"/* /usr/local/cef/ || true
-        fi
-      fi
-      # Set up CEF CMake configuration for OBS
-      sudo mkdir -p /usr/local/cef/lib/cmake/cef || true
-      sudo tee /usr/local/cef/lib/cmake/cef/cef-config.cmake > /dev/null << 'EOF'
-set(CEF_ROOT "/usr/local/cef")
-set(CEF_INCLUDE_DIR "${CEF_ROOT}")
-set(CEF_LIB_DIR "${CEF_ROOT}/Release")
-set(CEF_LIB_DEBUG_DIR "${CEF_ROOT}/Debug")
-set(CEF_BINARY_DIR "${CEF_ROOT}/Release")
-set(CEF_BINARY_DEBUG_DIR "${CEF_ROOT}/Debug")
-set(CEF_RESOURCE_DIR "${CEF_ROOT}/Resources")
-set(CEF_BINARY_FILES
-  chrome-sandbox
-  libcef.so
-  libEGL.so
-  libGLESv2.so
-  libvk_swiftshader.so
-  libvulkan.so.1
-  v8_context_snapshot.bin
-  vk_swiftshader_icd.json
-)
-EOF
       sudo apt-get install -f -y || true
       ;;
     *)
@@ -476,59 +433,81 @@ configure_obs_deps() {
 }
 
 build_obs() {
-  log "Configuring and building OBS against custom FFmpeg"
-  local obs_build
-  obs_build="$BUILD_DIR/obs-studio"
-  rm -rf "$obs_build"
-  mkdir -p "$obs_build"
+  log "Configuring and building OBS using CMake preset ubuntu-ci"
+  local obs_src obs_build
+  obs_src="$OBS_SRC_DIR"
 
-  pushd "$obs_build" >/dev/null
-
-  # Help CMake find SIMDe if installed from distro packages
-  SIMDE_HINT=""
-  if [[ -f /usr/include/simde/simde-common.h ]]; then
-    SIMDE_HINT="-DSIMDe_INCLUDE_DIR=/usr/include"
+  # Write CMakeUserPresets.json with ubuntu-ci if not present
+  if [[ ! -f "$obs_src/CMakeUserPresets.json" ]]; then
+    tee "$obs_src/CMakeUserPresets.json" > /dev/null << 'EOF'
+{
+  "version": 8,
+  "cmakeMinimumRequired": {"major": 3, "minor": 28, "patch": 0},
+  "configurePresets": [
+    {
+      "name": "obsrock-env",
+      "hidden": true,
+      "cacheVariables": {
+        "RESTREAM_CLIENTID": {"type": "STRING", "value": "$penv{RESTREAM_CLIENTID}"},
+        "RESTREAM_HASH": {"type": "STRING", "value": "$penv{RESTREAM_HASH}"},
+        "TWITCH_CLIENTID": {"type": "STRING", "value": "$penv{TWITCH_CLIENTID}"},
+        "TWITCH_HASH": {"type": "STRING", "value": "$penv{TWITCH_HASH}"},
+        "YOUTUBE_CLIENTID": {"type": "STRING", "value": "$penv{YOUTUBE_CLIENTID}"},
+        "YOUTUBE_CLIENTID_HASH": {"type": "STRING", "value": "$penv{YOUTUBE_CLIENTID_HASH}"},
+        "YOUTUBE_SECRET": {"type": "STRING", "value": "$penv{YOUTUBE_SECRET}"},
+        "YOUTUBE_SECRET_HASH": {"type": "STRING", "value": "$penv{YOUTUBE_SECRET_HASH}"}
+      }
+    },
+    {
+      "name": "obsrock-ubuntu",
+      "displayName": "Ubuntu",
+      "description": "obs-studio for Ubuntu",
+      "inherits": ["obsrock-env"],
+      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux"},
+      "binaryDir": "${sourceDir}/build_ubuntu",
+      "generator": "Ninja",
+      "warnings": {"dev": true, "deprecated": true},
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "ENABLE_AJA": false,
+        "ENABLE_VLC": true,
+        "ENABLE_WAYLAND": true,
+        "ENABLE_WEBRTC": false
+      }
+    },
+    {
+      "name": "obsrock-ubuntu-ci",
+      "inherits": ["obsrock-ubuntu"],
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_COMPILE_WARNING_AS_ERROR": true,
+        "CMAKE_COLOR_DIAGNOSTICS": true,
+        "ENABLE_CCACHE": true
+      }
+    }
+  ]
+}
+EOF
   fi
 
-  if [[ "$USE_CCACHE" == "1" && -n "${CC:-}" ]]; then
-    CMAKE_LAUNCHERS=(
-      -DCMAKE_C_COMPILER_LAUNCHER=ccache
-      -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-    )
-  else
-    CMAKE_LAUNCHERS=()
-  fi
-
-  # Build optimization flags
-  CMAKE_OPTIMIZATIONS=()
-  if [[ "$ENABLE_LTO" == "1" ]]; then
-    CMAKE_OPTIMIZATIONS+=(-DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON)
-  fi
-  if [[ "$ENABLE_UNITY_BUILD" == "1" ]]; then
-    CMAKE_OPTIMIZATIONS+=(-DCMAKE_UNITY_BUILD=ON)
-  fi
-
-
-  cmake -G Ninja \
-    -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
+  # Configure via preset, passing site-specific variables
+  pushd "$obs_src" >/dev/null
+  cmake --preset obsrock-ubuntu-ci \
+    -DENABLE_BROWSER=OFF \
+    -DFFMPEG_ROOT="$PREFIX_DIR" \
+    -DCMAKE_PREFIX_PATH="$PREFIX_DIR" \
     -DUNIX_STRUCTURE=ON \
     -DENABLE_PIPEWIRE=ON \
     -DENABLE_WAYLAND=ON \
     -DENABLE_QT6=ON \
-    -DENABLE_BROWSER=ON \
-    -DCEF_ROOT_DIR="/usr/local/cef" \
     -DENABLE_FDK=ON \
     -DENABLE_AJA=OFF \
-    -DFFMPEG_ROOT="$PREFIX_DIR" \
-    -DCMAKE_PREFIX_PATH="$PREFIX_DIR" \
     -DCMAKE_C_FLAGS="-D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE" \
-    -DCMAKE_CXX_FLAGS="-D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE" \
-    ${CMAKE_OPTIMIZATIONS[@]:-} \
-    ${CMAKE_LAUNCHERS[@]:-} \
-    ${SIMDE_HINT} \
-    "$OBS_SRC_DIR"
+    -DCMAKE_CXX_FLAGS="-D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE"
 
-  ninja -j"$NUM_JOBS"
+  # Build using the preset binaryDir
+  obs_build="$obs_src/build_ubuntu"
+  cmake --build "$obs_build" -j"$NUM_JOBS"
 
   if [[ "$RUN_TESTS" == "1" ]]; then
     ctest --output-on-failure -j"$NUM_JOBS"
@@ -540,7 +519,7 @@ build_obs() {
 
   log "Building Debian packages"
   # Use CPack to generate debs
-  cpack -G DEB
+  (cd "$obs_build" && cpack -G DEB)
 
   popd >/dev/null
 
@@ -553,7 +532,7 @@ package_artifacts() {
   out="$WORKSPACE/artifacts"
   rm -rf "$out" && mkdir -p "$out"
   # CPack generates .deb files in the build directory
-  local obs_build="$BUILD_DIR/obs-studio"
+  local obs_build="$OBS_SRC_DIR/build_ubuntu"
   shopt -s nullglob
   for f in "$obs_build"/*.deb; do
     cp -v "$f" "$out/"
