@@ -2,30 +2,30 @@
 set -euo pipefail
 
 # Build ffmpeg-rockchip, then OBS Studio as a Debian package linked against the custom FFmpeg.
-# Outputs:
-#   - ffmpeg install prefix      : $WORKSPACE/install/ffmpeg-rockchip
-#   - obs .deb packages/artifacts: $WORKSPACE/build/obs-studio
-#
-# Supported on Ubuntu/Debian runners. Requires sudo.
+# Optimized for GitHub Actions with caching, parallel builds, and CEF integration for obs-browser.
+# ARM64-focused build for Rockchip platforms using pre-compiled CEF from OBS Project.
 
 WORKSPACE=${WORKSPACE:-"$(pwd)"}
 FFMPEG_SRC_DIR=${FFMPEG_SRC_DIR:-"$WORKSPACE/ffmpeg-rockchip"}
 MPP_SRC_DIR=${MPP_SRC_DIR:-"$WORKSPACE/mpp"}
 RGA_SRC_DIR=${RGA_SRC_DIR:-"$WORKSPACE/rga"}
 OBS_SRC_DIR=${OBS_SRC_DIR:-"$WORKSPACE/obs-studio"}
+CEF_ROOT_DIR=${CEF_ROOT_DIR:-"$WORKSPACE/cef"}
 PREFIX_DIR=${PREFIX_DIR:-"$WORKSPACE/install/ffmpeg-rockchip"}
 BUILD_DIR=${BUILD_DIR:-"$WORKSPACE/build"}
-NUM_JOBS=${NUM_JOBS:-"$(nproc || sysctl -n hw.ncpu)"}
-BUILD_TYPE=${BUILD_TYPE:-Release}
+NUM_JOBS=${NUM_JOBS:-"$(nproc)"}
+BUILD_TYPE=${BUILD_TYPE:-RelWithDebInfo}
 RUN_TESTS=${RUN_TESTS:-"0"}
-# ccache settings
-CCACHE_DIR=${CCACHE_DIR:-"$WORKSPACE/.ccache"}
-CCACHE_MAXSIZE=${CCACHE_MAXSIZE:-"10G"}
-# Allow opting out
+# GitHub Actions optimizations
+CCACHE_DIR=${CCACHE_DIR:-"$HOME/.ccache"}
+CCACHE_MAXSIZE=${CCACHE_MAXSIZE:-"3G"} # Increased for CEF builds
 USE_CCACHE=${USE_CCACHE:-"1"}
-# Build optimization settings
-ENABLE_LTO=${ENABLE_LTO:-"1"}
-ENABLE_UNITY_BUILD=${ENABLE_UNITY_BUILD:-"0"}
+ENABLE_LTO=${ENABLE_LTO:-"0"} # Disable LTO for faster CI builds
+ENABLE_UNITY_BUILD=${ENABLE_UNITY_BUILD:-"0"} # Disable unity builds
+# CEF settings - ARM64 only, using OBS pre-compiled version
+CEF_VERSION=${CEF_VERSION:-"6533_linux_aarch64_v6"}
+CEF_ARCH="linuxarm64" # Fixed to ARM64 only
+CEF_URL="https://cdn-fastly.obsproject.com/downloads/cef_binary_6533_linux_aarch64_v6.tar.xz"
 # Source control settings
 FFMPEG_BRANCH=${FFMPEG_BRANCH:-"6.1"}
 OBS_VERSION=${OBS_VERSION:-"32.0.0"}
@@ -33,11 +33,19 @@ OBS_VERSION=${OBS_VERSION:-"32.0.0"}
 mkdir -p "$PREFIX_DIR" "$BUILD_DIR"
 
 log() {
-  echo "[build-obs-rockchip] $*"
+  echo "::group::$*"
+  echo "[$(date '+%H:%M:%S')] $*"
+}
+
+end_group() {
+  echo "::endgroup::"
 }
 
 require_command() {
-  command -v "$1" >/dev/null 2>&1 || { echo "Missing required command: $1"; exit 1; }
+  command -v "$1" >/dev/null 2>&1 || { 
+    echo "::error::Missing required command: $1"; 
+    exit 1; 
+  }
 }
 
 detect_distro() {
@@ -50,187 +58,306 @@ detect_distro() {
 }
 
 install_deps() {
+  log "Installing dependencies"
   local id
   id=$(detect_distro)
-  log "Detected distro: $id"
-
+  
+  # Use GitHub Actions runner optimization
+  export DEBIAN_FRONTEND=noninteractive
+  
   case "$id" in
     ubuntu|debian)
       # Update package lists
-      sudo apt-get update
+      sudo apt-get update -qq
       
-      # Install essential packages first
-      sudo apt-get install -y --no-install-recommends software-properties-common
-      sudo add-apt-repository -y universe || true
-      sudo add-apt-repository -y multiverse || true
-      # Ensure modern CMake (>=3.28). Ubuntu 24.04 has >=3.28 already; on older distros, add Kitware APT.
-      # Use cmake_minimum_required check inside a cmake -P script to avoid shell env vars.
-      if ! cmake --version >/dev/null 2>&1 || ! cmake -P <(printf "cmake_minimum_required(VERSION 3.28)"); then
-        . /etc/os-release || true
-        CODENAME=${UBUNTU_CODENAME:-"noble"}
-        sudo apt-get install -y --no-install-recommends ca-certificates gnupg
-        sudo rm -f /usr/share/keyrings/kitware-archive-keyring.gpg || true
-        curl -fsSL https://apt.kitware.com/keys/kitware-archive-latest.asc | sudo gpg --dearmor -o /usr/share/keyrings/kitware-archive-keyring.gpg
-        echo "deb [signed-by=/usr/share/keyrings/kitware-archive-keyring.gpg] https://apt.kitware.com/ubuntu/ $CODENAME main" | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
-        sudo apt-get update
-      fi
-      # Build tools (required)
+      # Core build tools (from FFmpeg guide + OBS requirements)
       sudo apt-get install -y --no-install-recommends \
-        build-essential cmake extra-cmake-modules ninja-build pkg-config \
-        git curl ccache python3 python3-pip zlib1g-dev yasm nasm autoconf \
-        automake libtool checkinstall libssl-dev libdrm-dev libx264-dev \
-        libx265-dev libv4l-dev libvpx-dev libx11-dev libxext-dev libxfixes-dev \
-        libxcb1-dev libxcb-shm0-dev libxcb-xfixes0-dev libxcb-randr0-dev \
-        libxcb-xinerama0-dev libxcb-composite0-dev libxcb-xinput-dev libxcomposite-dev libxinerama-dev libgl1-mesa-dev \
-        libglvnd-dev libgles2-mesa-dev libasound2-dev libpulse-dev \
-        libx11-xcb-dev libxkbcommon-dev wayland-protocols \
-        libfreetype6-dev libfontconfig1-dev libjansson-dev libmbedtls-dev \
-        libcurl4-openssl-dev libudev-dev libpci-dev swig libcmocka-dev \
-        libpipewire-0.3-dev libqrcodegencpp-dev uthash-dev libva-dev \
-        libspeexdsp-dev libsrt-openssl-dev qt6-base-dev qt6-base-private-dev qt6-wayland \
-        qt6-image-formats-plugins fakeroot debhelper devscripts equivs libsimde-dev \
-        libxss-dev libdbus-1-dev nlohmann-json3-dev libwebsocketpp-dev libasio-dev \
-        libvulkan-dev libzstd-dev libb2-dev libsrtp2-1 libusrsctp2 libvlc-dev \
-        meson libfdk-aac-dev libgtk-3-dev
-      # Optional vendor SDKs (best-effort)
-      # libajantv2-dev installed manually from Debian multimedia repository
-      # Optional packages (best-effort; may not exist in minimal images)
-      sudo apt-get install -y --no-install-recommends librist-dev || true
-      # sudo apt-get install -y --no-install-recommends libvpl-dev || true #Not available on arm64
-      sudo apt-get install -y --no-install-recommends qt6-svg-dev || true
+        autoconf automake build-essential cmake extra-cmake-modules \
+        ninja-build pkg-config clang clang-format git-core curl ccache \
+        git zsh libtool meson texinfo wget yasm zlib1g-dev checkinstall \
+        fakeroot debhelper devscripts equivs
       
-      # Download external dependencies in parallel
-      log "Downloading external dependencies in parallel..."
+      # FFmpeg dependencies (from FFmpeg Ubuntu guide)
+      sudo apt-get install -y --no-install-recommends \
+        libass-dev libfreetype6-dev libgnutls28-dev libmp3lame-dev \
+        libsdl2-dev libva-dev libvdpau-dev libvorbis-dev libxcb1-dev \
+        libxcb-shm0-dev libxcb-xfixes0-dev libx264-dev libx265-dev \
+        libvpx-dev libfdk-aac-dev libopus-dev libnuma-dev
+      
+      # Additional FFmpeg libraries for Ubuntu 20.04+
+      sudo apt-get install -y --no-install-recommends \
+        libunistring-dev libaom-dev libdav1d-dev || true
+      
+      # OBS Studio specific dependencies
+      sudo apt-get install -y --no-install-recommends \
+        libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev \
+        libavutil-dev libswresample-dev libswscale-dev libcurl4-openssl-dev \
+        libmbedtls-dev libgl1-mesa-dev libjansson-dev libluajit-5.1-dev \
+        python3-dev libsimde-dev
+      
+      # X11/Wayland/Graphics
+      sudo apt-get install -y --no-install-recommends \
+        libx11-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xinerama0-dev \
+        libxcb-composite0-dev libxcomposite-dev libxinerama-dev libxcb1-dev \
+        libx11-xcb-dev libxcb-xfixes0-dev swig libcmocka-dev libxss-dev \
+        libglvnd-dev libgles2-mesa-dev libwayland-dev librist-dev \
+        libsrt-openssl-dev libpci-dev libpipewire-0.3-dev libqrcodegencpp-dev \
+        uthash-dev
+      
+      # CEF/Chromium dependencies - ATK (Accessibility Toolkit)
+      sudo apt-get install -y --no-install-recommends \
+        libatk1.0-dev libatk-bridge2.0-dev libatspi2.0-dev \
+        libatk-adaptor
+      
+      # CEF/Chromium dependencies - X11 extensions
+      sudo apt-get install -y --no-install-recommends \
+        libxdamage-dev libxfixes-dev libxrandr-dev libxrender-dev \
+        libxext-dev libxmu-dev libxt-dev libxpm-dev
+      
+      # Qt6 and UI
+      sudo apt-get install -y --no-install-recommends \
+        qt6-base-dev qt6-base-private-dev qt6-svg-dev qt6-wayland \
+        qt6-image-formats-plugins
+      
+      # Audio/Video processing
+      sudo apt-get install -y --no-install-recommends \
+        libasound2-dev libfontconfig-dev libfreetype6-dev libjack-jackd2-dev \
+        libpulse-dev libsndio-dev libspeexdsp-dev libudev-dev libv4l-dev \
+        libva-dev libvlc-dev libdrm-dev nlohmann-json3-dev \
+        libwebsocketpp-dev libasio-dev
+      
+      # Additional build tools
+      sudo apt-get install -y --no-install-recommends \
+        nasm xz-utils
+      
+      # Download and install libdatachannel for ARM64
       (
-        # Download libdatachannel packages
-        if [[ ! -f /tmp/libdatachannel0.23.deb ]]; then
-          wget -q https://www.deb-multimedia.org/pool/main/libd/libdatachannel-dmo/libdatachannel0.23_0.23.1-dmo1_arm64.deb -O /tmp/libdatachannel0.23.deb || true
-        fi
-        if [[ ! -f /tmp/libdatachannel-dev.deb ]]; then
-          wget -q https://www.deb-multimedia.org/pool/main/libd/libdatachannel-dmo/libdatachannel-dev_0.23.1-dmo1_arm64.deb -O /tmp/libdatachannel-dev.deb || true
-        fi
+        cd /tmp
+        wget -q "https://www.deb-multimedia.org/pool/main/libd/libdatachannel-dmo/libdatachannel0.23_0.23.1-dmo1_arm64.deb" || true
+        wget -q "https://www.deb-multimedia.org/pool/main/libd/libdatachannel-dmo/libdatachannel-dev_0.23.1-dmo1_arm64.deb" || true
+        
+        # Install downloaded packages
+        for deb in libdatachannel*.deb; do
+          [[ -f "$deb" ]] && sudo dpkg -i "$deb" || true
+        done
+        
+        # Fix any broken dependencies
+        sudo apt-get install -f -y || true
       ) &
       
-      # Wait for downloads to complete
-      wait
-      
-      # Install libdatachannel packages
-      if [[ -f /tmp/libdatachannel0.23.deb ]]; then
-        sudo dpkg -i /tmp/libdatachannel0.23.deb || true
-      fi
-      if [[ -f /tmp/libdatachannel-dev.deb ]]; then
-        sudo dpkg -i /tmp/libdatachannel-dev.deb || true
-      fi
-      sudo apt-get install -f -y || true
+      wait # Wait for background installation
       ;;
     *)
-      log "Non-Debian distro detected; this script targets Debian-based build hosts."
+      echo "::error::Unsupported distribution: $id"
+      exit 1
       ;;
   esac
+  end_group
 }
 
 setup_ccache() {
   if [[ "$USE_CCACHE" != "1" ]]; then
     return
   fi
+  
+  log "Setting up ccache"
   if command -v ccache >/dev/null 2>&1; then
-    log "Enabling ccache at $CCACHE_DIR (max $CCACHE_MAXSIZE)"
     mkdir -p "$CCACHE_DIR"
-    ccache --set-config=cache_dir="$CCACHE_DIR" || true
-    ccache --set-config=max_size="$CCACHE_MAXSIZE" || true
-    ccache --zero-stats || true
+    ccache --set-config=cache_dir="$CCACHE_DIR"
+    ccache --set-config=max_size="$CCACHE_MAXSIZE"
+    ccache --set-config=compression=true
+    ccache --set-config=compression_level=6
+    ccache --zero-stats
+    
     export CC="ccache gcc"
     export CXX="ccache g++"
-    export CUDAHOSTCXX="ccache g++"
     export CCACHE_BASEDIR="$WORKSPACE"
-    export CCACHE_SLOPPINESS=time_macros
-  else
-    log "ccache not found; proceeding without compiler cache"
+    export CCACHE_SLOPPINESS="time_macros,include_file_mtime"
+    export CCACHE_COMPILERCHECK=content
+    
+    echo "::notice::ccache enabled with $(ccache --get-config=cache_dir) (max $(ccache --get-config=max_size))"
   fi
+  end_group
 }
 
-clone_obs() {
-  log "Cloning OBS Studio version $OBS_VERSION"
-  require_command git
+download_and_setup_cef() {
+  log "Setting up pre-compiled CEF for ARM64"
   
-  # Check if OBS is already cloned and on the correct version
-  if [[ -d "$OBS_SRC_DIR/.git" ]]; then
-    pushd "$OBS_SRC_DIR" >/dev/null
-    current_version=$(git describe --tags --exact-match 2>/dev/null || echo "unknown")
-    if [[ "$current_version" == "$OBS_VERSION" ]]; then
-      log "OBS Studio $OBS_VERSION already cloned, skipping"
-      popd >/dev/null
-      return 0
-    fi
-    popd >/dev/null
+  # Check if CEF is already extracted and ready
+  if [[ -d "$CEF_ROOT_DIR" && -f "$CEF_ROOT_DIR/Release/libcef.so" && -f "$CEF_ROOT_DIR/build/libcef_dll_wrapper/libcef_dll_wrapper.a" ]]; then
+    echo "::notice::CEF already downloaded and ready, skipping"
+    end_group
+    return 0
   fi
   
-  # Remove existing directory if it exists
-  rm -rf "$OBS_SRC_DIR"
+  local cef_archive="$WORKSPACE/cef.tar.xz"
   
-  # Clone the specific version (tag)
-  git clone --depth=1 --branch="$OBS_VERSION" https://github.com/obsproject/obs-studio.git "$OBS_SRC_DIR"
+  # Download CEF if not already present
+  if [[ ! -f "$cef_archive" ]]; then
+    echo "::notice::Downloading pre-compiled CEF from $CEF_URL"
+    local download_attempts=0
+    local max_attempts=3
+    
+    while [[ $download_attempts -lt $max_attempts ]]; do
+      if curl -L -o "$cef_archive" "$CEF_URL"; then
+        break
+      else
+        download_attempts=$((download_attempts + 1))
+        echo "::warning::Download attempt $download_attempts failed, retrying..."
+        rm -f "$cef_archive"
+        sleep 2
+      fi
+    done
+    
+    if [[ $download_attempts -eq $max_attempts ]]; then
+      echo "::error::Failed to download CEF after $max_attempts attempts from $CEF_URL"
+      exit 1
+    fi
+  fi
   
-  # Initialize and update submodules (required for obs-browser)
-  pushd "$OBS_SRC_DIR" >/dev/null
-  git submodule update --init --recursive
-  popd >/dev/null
+  # Verify the downloaded file
+  echo "::notice::Verifying downloaded CEF archive..."
+  if [[ ! -f "$cef_archive" ]]; then
+    echo "::error::CEF archive not found: $cef_archive"
+    exit 1
+  fi
   
-  pushd "$OBS_SRC_DIR" >/dev/null
-  git rev-parse --short HEAD | xargs -I{} bash -c 'echo "[build-obs-rockchip] OBS Studio @ {} (version ${OBS_VERSION})"'
-  popd >/dev/null
+  # Check file size (should be substantial for CEF)
+  local file_size=$(stat -c%s "$cef_archive" 2>/dev/null || echo "0")
+  if [[ "$file_size" -lt 1000000 ]]; then
+    echo "::error::CEF archive too small ($file_size bytes), likely corrupted"
+    rm -f "$cef_archive"
+    exit 1
+  fi
+  
+  # Test if it's a valid xz archive
+  if ! xz -t "$cef_archive" 2>/dev/null; then
+    echo "::error::CEF archive is not a valid xz file"
+    echo "::error::File info: $(file "$cef_archive")"
+    rm -f "$cef_archive"
+    exit 1
+  fi
+  
+  echo "::notice::CEF archive verified (size: $file_size bytes)"
+  
+  # Extract CEF archive
+  rm -rf "$CEF_ROOT_DIR"
+  mkdir -p "$CEF_ROOT_DIR"
+  echo "::notice::Extracting CEF archive..."
+  
+  if ! tar -xJf "$cef_archive" -C "$CEF_ROOT_DIR"; then
+    echo "::error::Tar extraction failed"
+    echo "::error::Archive file info: $(file "$cef_archive" 2>/dev/null || echo 'file not found')"
+    echo "::error::Archive size: $(stat -c%s "$cef_archive" 2>/dev/null || echo 'unknown') bytes"
+    exit 1
+  fi
+  
+  echo "::notice::Successfully extracted CEF archive"
+  
+  # Handle potential nested directory structure
+  if [[ -d "$CEF_ROOT_DIR/cef_binary_6533_linux_aarch64" ]]; then
+    echo "::notice::Moving contents from nested directory cef_binary_6533_linux_aarch64"
+    mv "$CEF_ROOT_DIR/cef_binary_6533_linux_aarch64"/* "$CEF_ROOT_DIR/" 2>/dev/null || true
+    rmdir "$CEF_ROOT_DIR/cef_binary_6533_linux_aarch64" 2>/dev/null || true
+  elif [[ -d "$CEF_ROOT_DIR/cef_binary_${CEF_VERSION}" ]]; then
+    echo "::notice::Moving contents from nested directory cef_binary_${CEF_VERSION}"
+    mv "$CEF_ROOT_DIR/cef_binary_${CEF_VERSION}"/* "$CEF_ROOT_DIR/" 2>/dev/null || true
+    rmdir "$CEF_ROOT_DIR/cef_binary_${CEF_VERSION}" 2>/dev/null || true
+  fi
+  
+  # Verify CEF extraction with detailed error reporting
+  echo "::notice::Verifying CEF extraction..."
+  echo "::notice::CEF directory contents:"
+  ls -la "$CEF_ROOT_DIR" || true
+  
+  if [[ ! -f "$CEF_ROOT_DIR/Release/libcef.so" ]]; then
+    echo "::error::CEF extraction failed - libcef.so not found in $CEF_ROOT_DIR/Release/"
+    echo "::error::Available files in Release directory:"
+    ls -la "$CEF_ROOT_DIR/Release/" 2>/dev/null || echo "::error::Release directory does not exist"
+    exit 1
+  fi
+  
+  # Verify pre-compiled wrapper is present
+  if [[ ! -f "$CEF_ROOT_DIR/build/libcef_dll_wrapper/libcef_dll_wrapper.a" ]]; then
+    echo "::error::Pre-compiled CEF wrapper not found - libcef_dll_wrapper.a missing"
+    echo "::error::Available files in build/libcef_dll_wrapper directory:"
+    ls -la "$CEF_ROOT_DIR/build/libcef_dll_wrapper/" 2>/dev/null || echo "::error::build/libcef_dll_wrapper directory does not exist"
+    exit 1
+  fi
+  
+  echo "::notice::Pre-compiled CEF setup completed successfully for ARM64"
+  echo "::notice::CEF wrapper found at: $CEF_ROOT_DIR/build/libcef_dll_wrapper/libcef_dll_wrapper.a"
+  end_group
 }
 
-clone_ffmpeg_rockchip() {
-  log "Cloning ffmpeg-rockchip branch $FFMPEG_BRANCH"
-  require_command git
+clone_repos() {
+  log "Cloning repositories"
   
-  # Check if ffmpeg-rockchip is already cloned and on the correct branch
-  if [[ -d "$FFMPEG_SRC_DIR/.git" ]]; then
-    pushd "$FFMPEG_SRC_DIR" >/dev/null
-    current_branch=$(git branch --show-current 2>/dev/null || echo "unknown")
-    if [[ "$current_branch" == "$FFMPEG_BRANCH" ]]; then
-      log "ffmpeg-rockchip branch $FFMPEG_BRANCH already cloned, skipping"
-      popd >/dev/null
-      return 0
-    fi
-    popd >/dev/null
-    # Only remove if on wrong branch
-    log "ffmpeg-rockchip on wrong branch ($current_branch vs $FFMPEG_BRANCH), removing"
-    rm -rf "$FFMPEG_SRC_DIR"
+  # Clone all repos in parallel
+  local pids=()
+  
+  # OBS Studio
+  if [[ ! -d "$OBS_SRC_DIR/.git" ]] || ! (cd "$OBS_SRC_DIR" && [[ "$(git describe --tags --exact-match 2>/dev/null || echo unknown)" == "$OBS_VERSION" ]]); then
+    (
+      rm -rf "$OBS_SRC_DIR"
+      git clone --depth=1 --branch="$OBS_VERSION" \
+        --recurse-submodules --shallow-submodules \
+        https://github.com/obsproject/obs-studio.git "$OBS_SRC_DIR"
+    ) &
+    pids+=($!)
   fi
   
-  # Clone the specific branch
-  git clone --depth=1 --branch="$FFMPEG_BRANCH" https://github.com/nyanmisaka/ffmpeg-rockchip.git "$FFMPEG_SRC_DIR"
+  # FFmpeg Rockchip
+  if [[ ! -d "$FFMPEG_SRC_DIR/.git" ]] || ! (cd "$FFMPEG_SRC_DIR" && [[ "$(git branch --show-current 2>/dev/null || echo unknown)" == "$FFMPEG_BRANCH" ]]); then
+    (
+      rm -rf "$FFMPEG_SRC_DIR"
+      git clone --depth=1 --branch="$FFMPEG_BRANCH" \
+        https://github.com/nyanmisaka/ffmpeg-rockchip.git "$FFMPEG_SRC_DIR"
+    ) &
+    pids+=($!)
+  fi
   
-  pushd "$FFMPEG_SRC_DIR" >/dev/null
-  git rev-parse --short HEAD | xargs -I{} bash -c 'echo "[build-obs-rockchip] ffmpeg-rockchip @ {} (branch ${FFMPEG_BRANCH})"'
-  popd >/dev/null
+  # MPP
+  if [[ ! -d "$MPP_SRC_DIR/.git" ]]; then
+    (
+      git clone -b jellyfin-mpp --depth=1 \
+        https://github.com/nyanmisaka/mpp.git "$MPP_SRC_DIR"
+    ) &
+    pids+=($!)
+  fi
+  
+  # RGA
+  if [[ ! -d "$RGA_SRC_DIR/.git" ]]; then
+    (
+      git clone -b jellyfin-rga --depth=1 \
+        https://github.com/nyanmisaka/rk-mirrors.git "$RGA_SRC_DIR"
+    ) &
+    pids+=($!)
+  fi
+  
+  # Wait for all clones to complete
+  for pid in "${pids[@]}"; do
+    wait "$pid"
+  done
+  
+  end_group
 }
 
 build_mpp() {
-  log "Building Rockchip MPP into $PREFIX_DIR"
-  require_command git
-  require_command cmake
-  require_command make
-
-  # Check if MPP is already built and installed
-  if [[ -f "$PREFIX_DIR/lib/pkgconfig/rockchip_mpp.pc" ]] && pkg-config --exists rockchip_mpp; then
-    log "MPP already built and installed, skipping build"
-    export PKG_CONFIG_PATH="$PREFIX_DIR/lib/pkgconfig:$PREFIX_DIR/lib/aarch64-linux-gnu/pkgconfig:$PREFIX_DIR/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
-    export LD_LIBRARY_PATH="$PREFIX_DIR/lib:${LD_LIBRARY_PATH:-}"
+  # Check if already built
+  if [[ -f "$PREFIX_DIR/lib/pkgconfig/rockchip_mpp.pc" ]]; then
+    log "MPP already built, skipping"
+    export PKG_CONFIG_PATH="$PREFIX_DIR/lib/pkgconfig:$PREFIX_DIR/lib/aarch64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
+    end_group
     return 0
   fi
 
-  if [[ ! -d "$MPP_SRC_DIR/.git" ]]; then
-    log "Cloning MPP repository..."
-    git clone -b jellyfin-mpp --depth=1 https://github.com/nyanmisaka/mpp.git "$MPP_SRC_DIR"
-  fi
-
-  pushd "$MPP_SRC_DIR" >/dev/null
-  mkdir -p rkmpp_build && cd rkmpp_build
+  log "Building Rockchip MPP"
   
-  # Configure with the correct options from your example
+  cd "$MPP_SRC_DIR"
+  mkdir -p build
+  cd build
+  
   cmake \
     -DCMAKE_INSTALL_PREFIX="$PREFIX_DIR" \
     -DCMAKE_BUILD_TYPE=Release \
@@ -240,46 +367,26 @@ build_mpp() {
   
   make -j"$NUM_JOBS"
   make install
-  popd >/dev/null
-
-  # Export for downstream discovery
-  export PKG_CONFIG_PATH="$PREFIX_DIR/lib/pkgconfig:$PREFIX_DIR/lib/aarch64-linux-gnu/pkgconfig:$PREFIX_DIR/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
+  
+  export PKG_CONFIG_PATH="$PREFIX_DIR/lib/pkgconfig:$PREFIX_DIR/lib/aarch64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
   export LD_LIBRARY_PATH="$PREFIX_DIR/lib:${LD_LIBRARY_PATH:-}"
-
-  if ! pkg-config --exists rockchip_mpp; then
-    log "rockchip_mpp.pc not found in PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
-    log "Listing possible pkgconfig dirs:"
-    ls -la "$PREFIX_DIR/lib" || true
-    ls -la "$PREFIX_DIR/lib/pkgconfig" || true
-    ls -la "$PREFIX_DIR/lib/aarch64-linux-gnu/pkgconfig" || true
-    ls -la "$PREFIX_DIR/lib/x86_64-linux-gnu/pkgconfig" || true
-    echo "ERROR: rockchip_mpp pkg-config not found after MPP install" >&2
-    exit 1
-  fi
+  
+  end_group
 }
 
 build_rga() {
-  log "Building Rockchip RGA into $PREFIX_DIR"
-  require_command git
-  require_command meson
-  require_command ninja
-
-  # Check if RGA is already built and installed
-  if [[ -f "$PREFIX_DIR/lib/pkgconfig/librga.pc" ]] && pkg-config --exists librga; then
-    log "RGA already built and installed, skipping build"
-    export PKG_CONFIG_PATH="$PREFIX_DIR/lib/pkgconfig:$PREFIX_DIR/lib/aarch64-linux-gnu/pkgconfig:$PREFIX_DIR/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
-    export LD_LIBRARY_PATH="$PREFIX_DIR/lib:${LD_LIBRARY_PATH:-}"
+  # Check if already built
+  if [[ -f "$PREFIX_DIR/lib/pkgconfig/librga.pc" ]]; then
+    log "RGA already built, skipping"
+    export PKG_CONFIG_PATH="$PREFIX_DIR/lib/pkgconfig:$PREFIX_DIR/lib/aarch64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
+    end_group
     return 0
   fi
 
-  if [[ ! -d "$RGA_SRC_DIR/.git" ]]; then
-    log "Cloning RGA repository..."
-    git clone -b jellyfin-rga --depth=1 https://github.com/nyanmisaka/rk-mirrors.git "$RGA_SRC_DIR"
-  fi
-
-  pushd "$RGA_SRC_DIR" >/dev/null
-  # Setup meson build directory
-  meson setup rkrga_build \
+  log "Building Rockchip RGA"
+  
+  cd "$RGA_SRC_DIR"
+  meson setup build \
     --prefix="$PREFIX_DIR" \
     --libdir=lib \
     --buildtype=release \
@@ -288,278 +395,211 @@ build_rga() {
     -Dlibdrm=false \
     -Dlibrga_demo=false
   
-  meson configure rkrga_build
-  ninja -C rkrga_build install
-  popd >/dev/null
-
-  # Export for downstream discovery
-  export PKG_CONFIG_PATH="$PREFIX_DIR/lib/pkgconfig:$PREFIX_DIR/lib/aarch64-linux-gnu/pkgconfig:$PREFIX_DIR/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
+  meson configure build
+  ninja -C build -j"$NUM_JOBS" install
+  
+  export PKG_CONFIG_PATH="$PREFIX_DIR/lib/pkgconfig:$PREFIX_DIR/lib/aarch64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
   export LD_LIBRARY_PATH="$PREFIX_DIR/lib:${LD_LIBRARY_PATH:-}"
-
-  if ! pkg-config --exists librga; then
-    log "librga.pc not found in PKG_CONFIG_PATH=$PKG_CONFIG_PATH"
-    log "Listing possible pkgconfig dirs:"
-    ls -la "$PREFIX_DIR/lib" || true
-    ls -la "$PREFIX_DIR/lib/pkgconfig" || true
-    ls -la "$PREFIX_DIR/lib/aarch64-linux-gnu/pkgconfig" || true
-    ls -la "$PREFIX_DIR/lib/x86_64-linux-gnu/pkgconfig" || true
-    echo "ERROR: librga pkg-config not found after RGA install" >&2
-    exit 1
-  fi
+  
+  end_group
 }
 
 build_ffmpeg_rockchip() {
-  log "Building ffmpeg-rockchip from $FFMPEG_SRC_DIR"
-  require_command gcc
-  require_command make
-
-  # Check if ffmpeg is already built and installed
-  if [[ -f "$PREFIX_DIR/bin/ffmpeg" ]] && [[ -f "$PREFIX_DIR/lib/pkgconfig/libavcodec.pc" ]]; then
-    log "ffmpeg-rockchip already built and installed, skipping build"
+  # Check if already built
+  if [[ -f "$PREFIX_DIR/bin/ffmpeg" && -f "$PREFIX_DIR/lib/pkgconfig/libavcodec.pc" ]]; then
+    log "FFmpeg already built, skipping"
     export PKG_CONFIG_PATH="$PREFIX_DIR/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
     export LD_LIBRARY_PATH="$PREFIX_DIR/lib:${LD_LIBRARY_PATH:-}"
     export PATH="$PREFIX_DIR/bin:$PATH"
+    end_group
     return 0
   fi
 
-  pushd "$FFMPEG_SRC_DIR" >/dev/null
-
-  # Ensure submodules if any (following common FFmpeg fork patterns)
-  if [[ -f .gitmodules ]]; then
-    git submodule update --init --recursive
-  fi
-
-  # Ensure we are on the requested branch/tag (defaults to 6.1 for OBS compatibility)
-  if [[ -d .git ]]; then
-    log "Checking out ffmpeg-rockchip branch/tag: ${FFMPEG_BRANCH}"
-    git fetch --tags --all --prune || true
-    if git rev-parse --verify --quiet "origin/${FFMPEG_BRANCH}" >/dev/null; then
-      git checkout -f "${FFMPEG_BRANCH}" || git checkout -f "origin/${FFMPEG_BRANCH}"
-    else
-      git checkout -f "${FFMPEG_BRANCH}" || true
-    fi
-    git rev-parse --short HEAD | xargs -I{} bash -c 'echo "[build-obs-rockchip] ffmpeg-rockchip @ {} (branch ${FFMPEG_BRANCH})"'
-  fi
-
-  # Ensure rockchip_mpp and librga are visible to pkg-config
-  if ! pkg-config --exists rockchip_mpp; then
-    echo "ERROR: rockchip_mpp not found using pkg-config (PKG_CONFIG_PATH=${PKG_CONFIG_PATH:-})" >&2
+  log "Building FFmpeg Rockchip"
+  
+  cd "$FFMPEG_SRC_DIR"
+  
+  # Ensure we have the dependencies
+  pkg-config --exists rockchip_mpp librga || {
+    echo "::error::Missing rockchip_mpp or librga pkg-config"
     exit 1
-  fi
+  }
   
-  if ! pkg-config --exists librga; then
-    echo "ERROR: librga not found using pkg-config (PKG_CONFIG_PATH=${PKG_CONFIG_PATH:-})" >&2
-    exit 1
-  fi
-
-  # Configure per ffmpeg-rockchip wiki guidance; enable RKMPP, RGA and common codecs OBS expects
-  CONFIGURE_FLAGS=(
-    --prefix="$PREFIX_DIR"
-    --enable-gpl
-    --enable-version3
-    --enable-nonfree
-    --enable-libx264
-    --enable-libx265
-    --enable-libvpx
-    --enable-libdrm
-    --enable-libv4l2
-    --enable-openssl
-    --enable-rkmpp
-    --enable-rkrga
-    --extra-cflags="-I$PREFIX_DIR/include"
-    --extra-ldflags="-L$PREFIX_DIR/lib"
-    --enable-shared
-    --disable-static
-  )
+  # Configure with optimized flags for CI
+  ./configure \
+    --prefix="$PREFIX_DIR" \
+    --enable-gpl --enable-version3 --enable-nonfree \
+    --enable-libx264 --enable-libx265 --enable-libvpx \
+    --enable-libdrm --enable-libv4l2 --enable-openssl \
+    --enable-rkmpp --enable-rkrga \
+    --extra-cflags="-I$PREFIX_DIR/include -O2 -pipe" \
+    --extra-ldflags="-L$PREFIX_DIR/lib -Wl,--as-needed" \
+    --enable-shared --disable-static \
+    --disable-doc --disable-htmlpages --disable-manpages \
+    --disable-podpages --disable-txtpages
   
-  # Add optimization flags for Release builds
-  if [[ "$BUILD_TYPE" == "Release" ]]; then
-    CONFIGURE_FLAGS+=(
-      --extra-cflags="-O3 -march=native"
-      --extra-ldflags="-Wl,--as-needed"
-    )
-  fi
-  
-  ./configure "${CONFIGURE_FLAGS[@]}"
-
-  # Ensure make uses ccache-wrapped compilers if enabled
-  if [[ "$USE_CCACHE" == "1" && -n "${CC:-}" ]]; then
-    export PATH="$(dirname $(command -v ccache)):$PATH"
-  fi
-
   make -j"$NUM_JOBS"
   make install
-  popd >/dev/null
-
-  # Provide pkg-config hints for OBS
+  
+  # Normalize version for OBS compatibility
+  local ffver_h="$PREFIX_DIR/include/libavutil/ffversion.h"
+  if [[ -f "$ffver_h" ]]; then
+    sed -i 's/^\([[:space:]]*#define[[:space:]]\+FFMPEG_VERSION[[:space:]]\+\).*/\1"6.1"/' "$ffver_h" || true
+  fi
+  
   export PKG_CONFIG_PATH="$PREFIX_DIR/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
   export LD_LIBRARY_PATH="$PREFIX_DIR/lib:${LD_LIBRARY_PATH:-}"
   export PATH="$PREFIX_DIR/bin:$PATH"
-
-  # If the installed ffversion.h does not expose a numeric major.minor, normalize it to 6.1
-  # This addresses OBS's FFmpeg version check when forks emit commit hashes.
-  local ffver_h
-  ffver_h="$PREFIX_DIR/include/libavutil/ffversion.h"
-  if [[ -f "$ffver_h" ]]; then
-    if ! grep -E '^[[:space:]]*#define[[:space:]]+FFMPEG_VERSION[[:space:]]+"n?[0-9]+\.[0-9]+' "$ffver_h" >/dev/null 2>&1; then
-      sed -i 's/^\([[:space:]]*#define[[:space:]]\+FFMPEG_VERSION[[:space:]]\+\).*/\1"6.1"/' "$ffver_h" || true
-      log "Normalized FFMPEG_VERSION in installed headers to 6.1 for OBS compatibility"
-    fi
-  fi
-}
-
-configure_obs_deps() {
-  log "Installing OBS Debian build dependencies via mk-build-deps"
-  pushd "$OBS_SRC_DIR" >/dev/null
-  if [[ -f debian/control ]]; then
-    sudo mk-build-deps -ir -t "apt-get -y" debian/control
-  else
-    log "debian/control not found; installing a minimal dependency set from wiki"
-    sudo apt-get update
-    sudo apt-get install -y --no-install-recommends \
-      libavcodec-dev libavdevice-dev libavfilter-dev libavformat-dev \
-      libavutil-dev libswresample-dev libswscale-dev libx264-dev \
-      libcurl4-openssl-dev libmbedtls-dev libgl1-mesa-dev libjansson-dev \
-      libluajit-5.1-dev python3-dev libx11-dev libxcb-randr0-dev \
-      libxcb-shm0-dev libxcb-xinerama0-dev libxcb-composite0-dev \
-      libxcb-xinput-dev libxcomposite-dev libxinerama-dev libxcb1-dev libx11-xcb-dev \
-      libxcb-xfixes0-dev swig libcmocka-dev libxss-dev libglvnd-dev \
-      libgles2-mesa-dev libwayland-dev libpci-dev libpipewire-0.3-dev \
-      libqrcodegencpp-dev uthash-dev libsimde-dev libspeexdsp-dev \
-      libdbus-1-dev nlohmann-json3-dev libwebsocketpp-dev libasio-dev \
-      libvulkan-dev libzstd-dev libb2-dev libsrtp2-1 libusrsctp2 libvlc-dev || true
-  fi
-  popd >/dev/null
+  
+  end_group
 }
 
 build_obs() {
-  log "Configuring and building OBS using CMake preset ubuntu-ci"
-  local obs_src obs_build
-  obs_src="$OBS_SRC_DIR"
-
-  # Write CMakeUserPresets.json with ubuntu-ci if not present
-  if [[ ! -f "$obs_src/CMakeUserPresets.json" ]]; then
-    tee "$obs_src/CMakeUserPresets.json" > /dev/null << 'EOF'
+  log "Building OBS Studio with Browser Support"
+  
+  cd "$OBS_SRC_DIR"
+  
+  # Install OBS build dependencies
+  if [[ -f debian/control ]]; then
+    sudo mk-build-deps -ir -t "apt-get -y --no-install-recommends" debian/control
+  fi
+  
+  # Verify CEF is ready (pre-compiled wrapper)
+  if [[ ! -f "$CEF_ROOT_DIR/build/libcef_dll_wrapper/libcef_dll_wrapper.a" ]]; then
+    echo "::error::Pre-compiled CEF wrapper not found at expected location"
+    exit 1
+  fi
+  
+  # Create optimized preset for CI with CEF
+  tee CMakeUserPresets.json > /dev/null << EOF
 {
   "version": 8,
   "cmakeMinimumRequired": {"major": 3, "minor": 28, "patch": 0},
   "configurePresets": [
     {
-      "name": "obsrock-env",
-      "hidden": true,
-      "cacheVariables": {
-        "RESTREAM_CLIENTID": {"type": "STRING", "value": "$penv{RESTREAM_CLIENTID}"},
-        "RESTREAM_HASH": {"type": "STRING", "value": "$penv{RESTREAM_HASH}"},
-        "TWITCH_CLIENTID": {"type": "STRING", "value": "$penv{TWITCH_CLIENTID}"},
-        "TWITCH_HASH": {"type": "STRING", "value": "$penv{TWITCH_HASH}"},
-        "YOUTUBE_CLIENTID": {"type": "STRING", "value": "$penv{YOUTUBE_CLIENTID}"},
-        "YOUTUBE_CLIENTID_HASH": {"type": "STRING", "value": "$penv{YOUTUBE_CLIENTID_HASH}"},
-        "YOUTUBE_SECRET": {"type": "STRING", "value": "$penv{YOUTUBE_SECRET}"},
-        "YOUTUBE_SECRET_HASH": {"type": "STRING", "value": "$penv{YOUTUBE_SECRET_HASH}"}
-      }
-    },
-    {
-      "name": "obsrock-ubuntu",
-      "displayName": "Ubuntu",
-      "description": "obs-studio for Ubuntu",
-      "inherits": ["obsrock-env"],
-      "condition": {"type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux"},
-      "binaryDir": "${sourceDir}/build_ubuntu",
+      "name": "ci-build",
+      "binaryDir": "\${sourceDir}/build",
       "generator": "Ninja",
-      "warnings": {"dev": true, "deprecated": true},
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_BUILD_TYPE": "$BUILD_TYPE",
+        "CMAKE_C_FLAGS": "-D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE",
+        "CMAKE_CXX_FLAGS": "-D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE", 
+        "FFMPEG_ROOT": "$PREFIX_DIR",
+        "CMAKE_PREFIX_PATH": "$PREFIX_DIR",
+        "CEF_ROOT_DIR": "$CEF_ROOT_DIR",
+        "UNIX_STRUCTURE": true,
+        "ENABLE_BROWSER": true,
+        "ENABLE_PIPEWIRE": true,
+        "ENABLE_WAYLAND": true,
+        "ENABLE_QT6": true,
+        "ENABLE_FDK": true,
         "ENABLE_AJA": false,
         "ENABLE_VLC": true,
-        "ENABLE_WAYLAND": true,
-        "ENABLE_WEBRTC": false
-      }
-    },
-    {
-      "name": "obsrock-ubuntu-ci",
-      "inherits": ["obsrock-ubuntu"],
-      "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "CMAKE_COMPILE_WARNING_AS_ERROR": true,
-        "CMAKE_COLOR_DIAGNOSTICS": true,
-        "ENABLE_CCACHE": true
+        "ENABLE_WEBRTC": false,
+        "ENABLE_CCACHE": $([[ "$USE_CCACHE" == "1" ]] && echo "true" || echo "false"),
+        "CMAKE_UNITY_BUILD": $([[ "$ENABLE_UNITY_BUILD" == "1" ]] && echo "true" || echo "false")
       }
     }
   ]
 }
 EOF
-  fi
 
-  # Configure via preset, passing site-specific variables
-  pushd "$obs_src" >/dev/null
-  cmake --preset obsrock-ubuntu-ci \
-    -DENABLE_BROWSER=OFF \
-    -DFFMPEG_ROOT="$PREFIX_DIR" \
-    -DCMAKE_PREFIX_PATH="$PREFIX_DIR" \
-    -DUNIX_STRUCTURE=ON \
-    -DENABLE_PIPEWIRE=ON \
-    -DENABLE_WAYLAND=ON \
-    -DENABLE_QT6=ON \
-    -DENABLE_FDK=ON \
-    -DENABLE_AJA=OFF \
-    -DCMAKE_C_FLAGS="-D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE" \
-    -DCMAKE_CXX_FLAGS="-D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE"
-
-  # Build using the preset binaryDir
-  obs_build="$obs_src/build_ubuntu"
-  cmake --build "$obs_build" -j"$NUM_JOBS"
-
+  cmake --preset ci-build
+  cmake --build build -j"$NUM_JOBS"
+  
   if [[ "$RUN_TESTS" == "1" ]]; then
-    ctest --output-on-failure -j"$NUM_JOBS"
+    cd build && ctest --output-on-failure -j"$NUM_JOBS"
+    cd ..
   fi
-
+  
+  # Copy CEF binaries to the build directory for packaging
+  echo "::notice::Copying CEF binaries for packaging"
+  local obs_build_dir="$OBS_SRC_DIR/build"
+  local cef_release_dir="$CEF_ROOT_DIR/Release"
+  local cef_resources_dir="$CEF_ROOT_DIR/Resources"
+  
+  # Create CEF directory structure in build
+  mkdir -p "$obs_build_dir/obs-plugins/64bit"
+  mkdir -p "$obs_build_dir/bin/64bit"
+  
+  # Copy CEF shared libraries
+  cp -v "$cef_release_dir/libcef.so" "$obs_build_dir/obs-plugins/64bit/"
+  cp -v "$cef_release_dir"/lib*.so "$obs_build_dir/obs-plugins/64bit/" 2>/dev/null || true
+  
+  # Copy CEF resources
+  if [[ -d "$cef_resources_dir" ]]; then
+    cp -rv "$cef_resources_dir"/* "$obs_build_dir/bin/64bit/" 2>/dev/null || true
+  fi
+  
+  # Copy CEF executables
+  if [[ -f "$cef_release_dir/chrome-sandbox" ]]; then
+    cp -v "$cef_release_dir/chrome-sandbox" "$obs_build_dir/bin/64bit/"
+    chmod +x "$obs_build_dir/bin/64bit/chrome-sandbox"
+  fi
+  
+  # Generate packages
+  cd build && cpack -G DEB
+  
+  # Show ccache stats
   if command -v ccache >/dev/null 2>&1; then
-    ccache --show-stats || true
+    echo "::notice::ccache stats: $(ccache --show-stats --verbose | grep -E '(cache hit|cache miss|cache hit rate)')"
   fi
-
-  log "Building Debian packages"
-  # Use CPack to generate debs
-  (cd "$obs_build" && cpack -G DEB)
-
-  popd >/dev/null
-
-  log "Artifacts located under $WORKSPACE"
+  
+  end_group
 }
 
 package_artifacts() {
-  log "Collecting artifacts"
-  local out
-  out="$WORKSPACE/artifacts"
-  rm -rf "$out" && mkdir -p "$out"
-  # CPack generates .deb files in the build directory
-  local obs_build="$OBS_SRC_DIR/build_ubuntu"
-  shopt -s nullglob
-  for f in "$obs_build"/*.deb; do
-    cp -v "$f" "$out/"
-  done
-  # Also check workspace root for any .deb files (fallback)
-  for f in "$WORKSPACE"/*.deb; do
-    cp -v "$f" "$out/"
-  done
-  # Include build logs if present
-  shopt -s nullglob
-  for f in "$WORKSPACE"/*.build "$WORKSPACE"/*.changes "$WORKSPACE"/*.dsc; do
-    [[ -f "$f" ]] && cp -v "$f" "$out/" || true
-  done
+  log "Packaging artifacts"
+  
+  local out="$WORKSPACE/artifacts"
+  mkdir -p "$out"
+  
+  # Collect .deb files
+  find "$WORKSPACE" -name "*.deb" -exec cp -v {} "$out/" \; 2>/dev/null || true
+  
+  # Create a manifest of what was built
+  tee "$out/build_info.txt" > /dev/null << EOF
+Build Information:
+- Date: $(date)
+- OBS Version: $OBS_VERSION
+- FFmpeg Branch: $FFMPEG_BRANCH  
+- CEF Version: $CEF_VERSION (pre-compiled from OBS Project)
+- CEF Architecture: $CEF_ARCH (ARM64 only)
+- Build Type: $BUILD_TYPE
+- Browser Support: Enabled (pre-compiled wrapper)
+- ccache: $USE_CCACHE
+- Unity Build: $ENABLE_UNITY_BUILD
+- Target Platform: Rockchip ARM64 (RK3588/RK3588s)
+EOF
+  
+  # List generated artifacts for GitHub Actions
+  if [[ -n "$(ls -A "$out" 2>/dev/null)" ]]; then
+    echo "::notice::Generated artifacts:"
+    ls -la "$out"
+  else
+    echo "::warning::No artifacts generated"
+  fi
+  
+  end_group
 }
 
 main() {
+  echo "::notice::Starting OBS Rockchip ARM64 build with Browser support ($(date))"
+  echo "::notice::Build configuration: $BUILD_TYPE, Jobs: $NUM_JOBS, ccache: $USE_CCACHE"
+  echo "::notice::CEF version: $CEF_VERSION (pre-compiled from OBS Project)"
+  echo "::notice::Target platform: Rockchip ARM64 (RK3588/RK3588s)"
+  
+  setup_ccache
   install_deps
-  clone_obs
-  clone_ffmpeg_rockchip
+  clone_repos
+  download_and_setup_cef
   build_mpp
-  build_rga
+  build_rga  
   build_ffmpeg_rockchip
-  configure_obs_deps
   build_obs
   package_artifacts
+  
+  echo "::notice::Build completed successfully ($(date))"
 }
 
 main "$@"
-
-

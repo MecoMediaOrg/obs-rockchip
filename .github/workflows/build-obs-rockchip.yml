@@ -13,6 +13,11 @@ on:
         required: false
         default: "6.1"
         type: string
+      cef_version:
+        description: "CEF version (e.g. 127.3.5+g114ea2a+chromium-127.0.6533.120)"
+        required: false
+        default: "127.3.5+g114ea2a+chromium-127.0.6533.120"
+        type: string
       ignore_cache:
         description: "Ignore/disable dependency cache for a clean build"
         required: false
@@ -27,6 +32,7 @@ jobs:
     env:
       OBS_VERSION: ${{ inputs.obs_version }}
       FFMPEG_BRANCH: ${{ inputs.ffmpeg_branch }}
+      CEF_VERSION: ${{ inputs.cef_version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -38,10 +44,12 @@ jobs:
           path: |
             ${{ github.workspace }}/.ccache
             ${{ github.workspace }}/install/ffmpeg-rockchip
-            /tmp/cef.tar.bz2
+            ${{ github.workspace }}/cef
+            ${{ github.workspace }}/cef.tar.bz2
             /tmp/libdatachannel*.deb
-          key: all-cache-${{ runner.os }}-${{ hashFiles('scripts/build-obs-rockchip.sh') }}
+          key: all-cache-${{ runner.os }}-${{ inputs.cef_version }}-${{ hashFiles('scripts/build-obs-rockchip.sh') }}
           restore-keys: |
+            all-cache-${{ runner.os }}-${{ inputs.cef_version }}-
             all-cache-${{ runner.os }}-
 
       - name: Make script executable
@@ -58,20 +66,39 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: obs-rockchip-debs
+          name: obs-rockchip-debs-${{ env.OBS_VERSION }}
           path: artifacts/*
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: "${{ env.OBS_VERSION }}-rockchip"
-          name: "${{ env.OBS_VERSION }}-rockchip"
+          tag_name: "${{ env.OBS_VERSION }}-rockchip-browser"
+          name: "OBS Studio ${{ env.OBS_VERSION }} for Rockchip (with Browser)"
           body: |
-            ## ${{ env.OBS_VERSION }}-rockchip
+            ## OBS Studio ${{ env.OBS_VERSION }} for Rockchip ARM64 with Browser Support
             
-            A specialized build of OBS Studio optimized for Rockchip ARM64 platforms (RK3588/RK3588s) with hardware-accelerated video encoding and decoding using Rockchip's MPP (Media Process Platform) and RGA (2D Raster Graphic Acceleration) libraries.
+            A specialized build of OBS Studio optimized for Rockchip ARM64 platforms (RK3588/RK3588s) with:
+            
+            ### Features
+            - **Hardware-accelerated encoding/decoding** using Rockchip MPP (Media Process Platform)
+            - **2D graphics acceleration** using Rockchip RGA (Raster Graphic Acceleration) 
+            - **Browser source support** using CEF ${{ env.CEF_VERSION }}
+            - **Custom FFmpeg** with Rockchip extensions (branch: ${{ env.FFMPEG_BRANCH }})
+            - **Qt6 interface** with Wayland support
+            - **PipeWire audio** support
+            
+            ### Installation
+            ```bash
+            sudo dpkg -i obs-studio_*.deb
+            sudo apt-get install -f  # Fix any dependency issues
+            ```
+            
+            ### Compatibility
+            - Tested on Ubuntu 24.04 ARM64
+            - Requires Rockchip RK3588/RK3588s SoC
+            - Requires Mesa drivers with DRM support
+            
+            Built on: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
           files: artifacts/*.deb
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-
