@@ -64,7 +64,8 @@ install_deps() {
       sudo add-apt-repository -y universe || true
       sudo add-apt-repository -y multiverse || true
       # Ensure modern CMake (>=3.28). Ubuntu 24.04 has >=3.28 already; on older distros, add Kitware APT.
-      if ! cmake --version >/dev/null 2>&1 || ! cmake -P <(printf "string(REGEX MATCH \\\"[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\" v ${CMAKE_VERSION}); if(v VERSION_LESS 3.28.0) message(FATAL_ERROR) "); then
+      # Use cmake_minimum_required check inside a cmake -P script to avoid shell env vars.
+      if ! cmake --version >/dev/null 2>&1 || ! cmake -P <(printf "cmake_minimum_required(VERSION 3.28)"); then
         . /etc/os-release || true
         CODENAME=${UBUNTU_CODENAME:-"noble"}
         sudo apt-get install -y --no-install-recommends ca-certificates gnupg
@@ -130,10 +131,17 @@ install_deps() {
       
       # Install CEF
       if [[ -f /tmp/cef.tar.bz2 ]]; then
+        # Clean any previously extracted CEF directories to avoid ambiguity
+        rm -rf /tmp/cef_binary_*_linuxarm64* || true
         cd /tmp && tar -xjf cef.tar.bz2 || true
-        sudo mkdir -p /usr/local/cef || true
-        # Copy from standard (non-minimal) package so libcef_dll_wrapper is available
-        sudo cp -r cef_binary_140.1.14+geb1c06e+chromium-140.0.7339.185_linuxarm64/* /usr/local/cef/ || true
+        # Detect extracted directory (supports both standard and minimal variants)
+        CEF_EXTRACT_DIR="$(find /tmp -maxdepth 1 -type d -name 'cef_binary_*_linuxarm64*' | head -n1 || true)"
+        if [[ -z "${CEF_EXTRACT_DIR}" || ! -d "${CEF_EXTRACT_DIR}" ]]; then
+          echo "CEF archive extracted, but directory not found" >&2
+        else
+          sudo mkdir -p /usr/local/cef || true
+          sudo cp -r "${CEF_EXTRACT_DIR}"/* /usr/local/cef/ || true
+        fi
       fi
       # Set up CEF CMake configuration for OBS
       sudo mkdir -p /usr/local/cef/lib/cmake/cef || true
