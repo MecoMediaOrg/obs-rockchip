@@ -5,7 +5,7 @@ on:
 
 jobs:
   build:
-    runs-on: blacksmith-8vcpu-ubuntu-2404-arm
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     permissions:
       contents: write
     steps:
@@ -20,7 +20,7 @@ jobs:
             ${{ github.workspace }}/install/ffmpeg-rockchip
             /tmp/cef.tar.bz2
             /tmp/libdatachannel*.deb
-          key: all-cache-${{ runner.os }}-${{ hashFiles('scripts/build-obs-rockchip.sh', 'ffmpeg-rockchip/**', 'obs-studio/**', 'mpp/**', 'rga/**') }}
+          key: all-cache-${{ runner.os }}-${{ hashFiles('scripts/build-obs-rockchip.sh') }}
           restore-keys: |
             all-cache-${{ runner.os }}-
 
@@ -42,10 +42,10 @@ jobs:
           name: obs-rockchip-debs
           path: artifacts/*
 
-      - name: Create GitHub Release (on tag)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: "${{ env.OBS_VERSION }}-rockchip"
           name: "${{ env.OBS_VERSION }}-rockchip"
           body: |
             ## ${{ env.OBS_VERSION }}-rockchip
