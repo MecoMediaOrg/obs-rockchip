@@ -1,4 +1,4 @@
-# OBS Rockchip
+# OBS Rockchip (Work in Progress)
 
 A specialized build of OBS Studio optimized for Rockchip ARM64 platforms (RK3588/RK3588s) with hardware-accelerated video encoding and decoding using Rockchip's MPP (Media Process Platform) and RGA (2D Raster Graphic Acceleration) libraries.
 
