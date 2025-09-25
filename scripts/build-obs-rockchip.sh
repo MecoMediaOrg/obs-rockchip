@@ -366,7 +366,7 @@ build_mpp() {
     ..
   
   make -j"$NUM_JOBS"
-  make install
+  sudo make install
   
   export PKG_CONFIG_PATH="$PREFIX_DIR/lib/pkgconfig:$PREFIX_DIR/lib/aarch64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
   export LD_LIBRARY_PATH="$PREFIX_DIR/lib:${LD_LIBRARY_PATH:-}"
@@ -439,7 +439,7 @@ build_ffmpeg_rockchip() {
     --disable-podpages --disable-txtpages
   
   make -j"$NUM_JOBS"
-  make install
+  sudo make install
   
   # Normalize version for OBS compatibility
   local ffver_h="$PREFIX_DIR/include/libavutil/ffversion.h"
