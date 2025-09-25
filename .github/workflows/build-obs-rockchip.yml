@@ -9,14 +9,14 @@ on:
         default: "32.0.0"
         type: string
       ffmpeg_branch:
-        description: "ffmpeg-rockchip branch/tag (e.g. 6.1)"
+        description: "ffmpeg-rockchip branch/tag (e.g. 7.1)"
         required: false
-        default: "6.1"
+        default: "7.1"
         type: string
       cef_version:
-        description: "CEF version (e.g. 127.3.5+g114ea2a+chromium-127.0.6533.120)"
+        description: "CEF version (e.g. 6533_linux_aarch64_v6)"
         required: false
-        default: "127.3.5+g114ea2a+chromium-127.0.6533.120"
+        default: "6533_linux_aarch64_v6"
         type: string
       ignore_cache:
         description: "Ignore/disable dependency cache for a clean build"
@@ -37,20 +37,35 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Cache all dependencies
+      - name: Cache CEF (version-independent)
         uses: actions/cache@v4
         if: ${{ !inputs.ignore_cache }}
         with:
           path: |
-            ${{ github.workspace }}/.ccache
-            ${{ github.workspace }}/install/ffmpeg-rockchip
             ${{ github.workspace }}/cef
             ${{ github.workspace }}/cef.tar.bz2
-            /tmp/libdatachannel*.deb
-          key: all-cache-${{ runner.os }}-${{ inputs.cef_version }}-${{ hashFiles('scripts/build-obs-rockchip.sh') }}
+          key: cef-cache-${{ runner.os }}-${{ inputs.cef_version }}
           restore-keys: |
-            all-cache-${{ runner.os }}-${{ inputs.cef_version }}-
-            all-cache-${{ runner.os }}-
+            cef-cache-${{ runner.os }}-
+
+      - name: Cache ccache (version-independent)
+        uses: actions/cache@v4
+        if: ${{ !inputs.ignore_cache }}
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ runner.os }}-${{ hashFiles('scripts/build-obs-rockchip.sh') }}
+          restore-keys: |
+            ccache-${{ runner.os }}-
+
+      - name: Cache FFmpeg dependencies (version-dependent)
+        uses: actions/cache@v4
+        if: ${{ !inputs.ignore_cache }}
+        with:
+          path: ${{ github.workspace }}/install/ffmpeg-rockchip
+          key: ffmpeg-cache-${{ runner.os }}-${{ inputs.ffmpeg_branch }}-${{ hashFiles('scripts/build-obs-rockchip.sh') }}
+          restore-keys: |
+            ffmpeg-cache-${{ runner.os }}-${{ inputs.ffmpeg_branch }}-
+            ffmpeg-cache-${{ runner.os }}-
 
       - name: Make script executable
         run: chmod +x scripts/build-obs-rockchip.sh
@@ -61,7 +76,33 @@ jobs:
           NUM_JOBS: 4
           CCACHE_DIR: ${{ github.workspace }}/.ccache
           USE_CCACHE: ${{ inputs.ignore_cache && '0' || '1' }}
+          OBS_VERSION: ${{ inputs.obs_version }}
+          FFMPEG_BRANCH: ${{ inputs.ffmpeg_branch }}
+          CEF_VERSION: ${{ inputs.cef_version }}
         run: scripts/build-obs-rockchip.sh
+
+      - name: Save CEF cache
+        uses: actions/cache/save@v4
+        if: ${{ !inputs.ignore_cache }}
+        with:
+          path: |
+            ${{ github.workspace }}/cef
+            ${{ github.workspace }}/cef.tar.bz2
+          key: cef-cache-${{ runner.os }}-${{ inputs.cef_version }}
+
+      - name: Save ccache
+        uses: actions/cache/save@v4
+        if: ${{ !inputs.ignore_cache }}
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ runner.os }}-${{ hashFiles('scripts/build-obs-rockchip.sh') }}
+
+      - name: Save FFmpeg cache
+        uses: actions/cache/save@v4
+        if: ${{ !inputs.ignore_cache }}
+        with:
+          path: ${{ github.workspace }}/install/ffmpeg-rockchip
+          key: ffmpeg-cache-${{ runner.os }}-${{ inputs.ffmpeg_branch }}-${{ hashFiles('scripts/build-obs-rockchip.sh') }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -98,7 +139,7 @@ jobs:
             - Requires Rockchip RK3588/RK3588s SoC
             - Requires Mesa drivers with DRM support
             
-            Built on: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+            Built on: Run #${{ github.run_number }} (GitHub Actions)
           files: artifacts/*.deb
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
